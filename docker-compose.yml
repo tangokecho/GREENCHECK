@@ -1,0 +1,110 @@
+version: "3.9"
+
+name: raincheck
+services:
+  db:
+    image: ankane/pgvector:latest
+    container_name: raincheck-db
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7
+    container_name: raincheck-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: ./apps/api/Dockerfile
+    container_name: raincheck-api
+    env_file: [.env]
+    command: >
+      bash -lc "
+        alembic upgrade head || true &&
+        uvicorn apps.api.main:app --host 0.0.0.0 --port ${API_PORT:-8000} --proxy-headers --forwarded-allow-ips='*'
+      "
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./:/workspace:cached
+
+  worker:
+    build:
+      context: .
+    container_name: raincheck-worker
+    env_file: [.env]
+    command: >
+      bash -lc "
+        celery -A apps.api.workers.app worker -l info
+      "
+    depends_on:
+      api:
+        condition: service_started
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    volumes:
+      - ./:/workspace:cached
+
+  scheduler:
+    build:
+      context: .
+    container_name: raincheck-scheduler
+    env_file: [.env]
+    command: >
+      bash -lc "
+        celery -A apps.api.workers.app beat -l info
+      "
+    depends_on:
+      api:
+        condition: service_started
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    volumes:
+      - ./:/workspace:cached
+
+  web:
+    build:
+      context: .
+      dockerfile: ./apps/web/Dockerfile
+    container_name: raincheck-web
+    env_file: [.env]
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    depends_on:
+      api:
+        condition: service_started
+    volumes:
+      - ./:/workspace:cached
+
+volumes:
+  db_data:
+  redis_data:

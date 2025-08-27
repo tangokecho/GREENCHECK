@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+celery[redis]
+redis
+sqlalchemy
+alembic
+reportlab
+jinja2
+docxtpl
+weasyprint
