@@ -1,7 +1,9 @@
+import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import os
+
+from .routers.assets import router as assets_router
 
 app = FastAPI(title="RainCheck API", version="0.1.0")
 
@@ -10,6 +12,8 @@ app.add_middleware(
     allow_origins=["*"], allow_credentials=True,
     allow_methods=["*"], allow_headers=["*"],
 )
+
+app.include_router(assets_router)
 
 class Health(BaseModel):
     status: str
