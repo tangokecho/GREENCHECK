@@ -5,6 +5,12 @@ SERVICE_NAME="tri-core-autogen.service"
 USER_SYSTEMD_DIR="$HOME/.config/systemd/user"
 SERVICE_FILE="$USER_SYSTEMD_DIR/$SERVICE_NAME"
 
+# Ensure a user D-Bus session is available so systemctl can communicate
+# with the user instance. This uses the helper script to start a session
+# bus when one is not already present.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+eval "$($SCRIPT_DIR/create_user_bus.sh)"
+
 mkdir -p "$USER_SYSTEMD_DIR"
 
 cat > "$SERVICE_FILE" <<'SERVICE'
