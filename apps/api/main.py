@@ -3,6 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os
 
+from .routers.homequest import router as homequest_router
+
 app = FastAPI(title="RainCheck API", version="0.1.0")
 
 app.add_middleware(
@@ -10,6 +12,8 @@ app.add_middleware(
     allow_origins=["*"], allow_credentials=True,
     allow_methods=["*"], allow_headers=["*"],
 )
+
+app.include_router(homequest_router)
 
 class Health(BaseModel):
     status: str
