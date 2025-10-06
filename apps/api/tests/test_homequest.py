@@ -55,6 +55,23 @@ def test_create_plan_persists_for_fetch():
 
     assert plan.scorecard.target_score >= plan.scorecard.baseline_score
     assert plan.priority_actions  # at least one recommendation
+    assert plan.financial_summary.total_estimated_cost == sum(
+        action.estimated_cost for action in plan.priority_actions
+    )
+    if plan.financial_summary.total_estimated_annual_savings:
+        assert plan.financial_summary.simple_payback_years > 0
 
     fetched = planner.fetch_plan(plan.plan_id)
     assert fetched == plan
+
+
+def test_budget_constrains_actions():
+    planner = HomeQuestPlanner()
+    request = sample_request()
+    request.annual_budget = 6000
+
+    plan = planner.create_plan(request)
+
+    total_cost = plan.financial_summary.total_estimated_cost
+    assert total_cost <= request.annual_budget * 1.15
+    assert {action.id for action in plan.priority_actions}

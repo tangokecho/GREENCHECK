@@ -17,6 +17,7 @@ from ..schemas.homequest import (
     HomeSummary,
     ImplementationPhase,
     InsulationLevel,
+    PlanFinancialSummary,
     ScoreCard,
     UpgradeAction,
 )
@@ -72,6 +73,16 @@ class _ActionTemplate:
         )
 
 
+@dataclass(frozen=True)
+class _PlanSelection:
+    """Container for the actions chosen for a plan."""
+
+    actions: List[UpgradeAction]
+    templates: Dict[str, _ActionTemplate]
+    total_cost: float
+    total_savings: float
+
+
 class HomeQuestPlanner:
     """Generates decarbonisation pathways for a single residence."""
 
@@ -79,6 +90,9 @@ class HomeQuestPlanner:
         self._plans: Dict[str, HomeQuestPlan] = {}
         self._goal_library: Dict[GoalType, _GoalInfo] = self._build_goal_library()
         self._action_templates: List[_ActionTemplate] = self._build_action_templates()
+        self._template_index: Dict[str, _ActionTemplate] = {
+            template.id: template for template in self._action_templates
+        }
 
     # ------------------------------------------------------------------
     # Public API
@@ -98,9 +112,10 @@ class HomeQuestPlanner:
             request.home.average_monthly_bill, baseline_score, target_score
         )
 
-        actions = self._determine_actions(request)
-        timeline = self._build_timeline(actions)
-        financing = self._financing_options(request, actions)
+        selection = self._determine_actions(request)
+        timeline = self._build_timeline(selection.actions, selection.templates)
+        financing = self._financing_options(request, selection.actions, selection.total_cost)
+        financial_summary = self._build_financial_summary(selection)
 
         plan = HomeQuestPlan(
             plan_id=plan_id,
@@ -111,10 +126,11 @@ class HomeQuestPlanner:
                 estimated_annual_savings=round(estimated_savings, 2),
                 carbon_reduction_tonnes=round(carbon_reduction, 2),
             ),
-            priority_actions=actions,
+            financial_summary=financial_summary,
+            priority_actions=selection.actions,
             phased_timeline=timeline,
             financing=financing,
-            narrative=self._create_narrative(request, actions, target_score),
+            narrative=self._create_narrative(request, selection, target_score, financial_summary),
         )
 
         self._plans[plan_id] = plan
@@ -359,64 +375,176 @@ class HomeQuestPlanner:
         carbon_reduction = estimated_savings * 0.00045 * 12
         return estimated_savings, carbon_reduction
 
-    def _determine_actions(self, request: HomeQuestRequest) -> List[UpgradeAction]:
+    def _determine_actions(self, request: HomeQuestRequest) -> _PlanSelection:
         home = request.home
-        ranked: List[Tuple[float, UpgradeAction]] = []
+        candidates: Dict[str, Tuple[_ActionTemplate, float, UpgradeAction]] = {}
         for template in self._action_templates:
             if template.applies(home, request):
+                action = template.build_action(home)
                 weight = template.priority_weight(request.goals)
-                ranked.append((weight, template.build_action(home)))
+                candidates[template.id] = (template, weight, action)
 
-        if not ranked:
-            ranked.append((1.0, self._action_templates[-1].build_action(home)))
+        if not candidates:
+            fallback_template = self._action_templates[-1]
+            fallback_action = fallback_template.build_action(home)
+            return _PlanSelection(
+                actions=[fallback_action],
+                templates={fallback_action.id: fallback_template},
+                total_cost=round(fallback_action.estimated_cost, 2),
+                total_savings=round(fallback_action.estimated_annual_savings, 2),
+            )
 
-        ranked.sort(key=lambda item: item[0], reverse=True)
-        return [action for _weight, action in ranked]
+        sorted_ids = sorted(
+            candidates.keys(), key=lambda template_id: candidates[template_id][1], reverse=True
+        )
+        cheapest_cost = min(value[2].estimated_cost for value in candidates.values())
 
-    def _build_timeline(self, actions: List[UpgradeAction]) -> List[ImplementationPhase]:
+        budget_cap = request.annual_budget * 1.15 if request.annual_budget else None
+        selected_actions: List[UpgradeAction] = []
+        selected_templates: Dict[str, _ActionTemplate] = {}
+        selected_ids: set[str] = set()
+        total_cost = 0.0
+        total_savings = 0.0
+
+        def dependency_chain(template: _ActionTemplate) -> List[_ActionTemplate]:
+            chain: List[_ActionTemplate] = []
+            visited: set[str] = set()
+
+            def visit(current: _ActionTemplate) -> None:
+                if current.id in visited or current.id in selected_ids:
+                    return
+                visited.add(current.id)
+                for dep_id in current.dependencies:
+                    dep_template = self._template_index.get(dep_id)
+                    if not dep_template:
+                        continue
+                    if dep_id not in candidates:
+                        continue
+                    visit(dep_template)
+                if current.id in candidates:
+                    chain.append(current)
+
+            visit(template)
+            return chain
+
+        for template_id in sorted_ids:
+            template = candidates[template_id][0]
+            if template.id in selected_ids:
+                continue
+
+            chain = dependency_chain(template)
+            if not chain:
+                continue
+
+            incremental_cost = sum(
+                candidates[item.id][2].estimated_cost for item in chain if item.id not in selected_ids
+            )
+            if budget_cap is not None:
+                if not selected_actions and incremental_cost > budget_cap and cheapest_cost <= budget_cap:
+                    continue
+                if selected_actions and total_cost + incremental_cost > budget_cap:
+                    continue
+
+            for item in chain:
+                if item.id in selected_ids:
+                    continue
+                action = candidates[item.id][2]
+                selected_actions.append(action)
+                selected_templates[action.id] = item
+                selected_ids.add(item.id)
+                total_cost += action.estimated_cost
+                total_savings += action.estimated_annual_savings
+
+        if not selected_actions:
+            fallback_id = min(
+                candidates.keys(), key=lambda template_id: candidates[template_id][2].estimated_cost
+            )
+            fallback_template, _weight, fallback_action = candidates[fallback_id]
+            selected_actions.append(fallback_action)
+            selected_templates[fallback_action.id] = fallback_template
+            total_cost = fallback_action.estimated_cost
+            total_savings = fallback_action.estimated_annual_savings
+
+        return _PlanSelection(
+            actions=selected_actions,
+            templates=selected_templates,
+            total_cost=round(total_cost, 2),
+            total_savings=round(total_savings, 2),
+        )
+
+    def _build_timeline(
+        self, actions: List[UpgradeAction], templates: Dict[str, _ActionTemplate]
+    ) -> List[ImplementationPhase]:
         if not actions:
             return []
 
-        phases: List[ImplementationPhase] = []
-        first_wave = [action.title for action in actions[:2]]
-        phases.append(
-            ImplementationPhase(
-                name="Kickoff",
-                timeframe="0-6 months",
-                focus="Start with audits and quick efficiency wins",
-                actions=first_wave,
-            )
-        )
+        kickoff: List[str] = []
+        deep: List[str] = []
+        future: List[str] = []
 
-        if len(actions) > 2:
-            middle = [action.title for action in actions[2:5]]
+        for action in actions:
+            template = templates.get(action.id)
+            if not template:
+                kickoff.append(action.title)
+                continue
+
+            difficulty = template.difficulty.lower()
+            impact = template.impact_level.lower()
+
+            if difficulty == "low":
+                kickoff.append(action.title)
+            elif difficulty == "high" or impact == "high" or template.dependencies:
+                deep.append(action.title)
+            else:
+                future.append(action.title)
+
+        phases: List[ImplementationPhase] = []
+        if kickoff:
+            phases.append(
+                ImplementationPhase(
+                    name="Kickoff",
+                    timeframe="0-6 months",
+                    focus="Tackle assessments and no-regret efficiency measures",
+                    actions=kickoff,
+                )
+            )
+
+        if deep:
             phases.append(
                 ImplementationPhase(
                     name="Deep retrofits",
                     timeframe="6-18 months",
-                    focus="Schedule mechanical upgrades and ventilation improvements",
-                    actions=middle,
+                    focus="Schedule major mechanical and envelope projects with vetted crews",
+                    actions=deep,
                 )
             )
 
-        if len(actions) > 5:
-            later = [action.title for action in actions[5:]]
+        if future:
             phases.append(
                 ImplementationPhase(
                     name="Future readiness",
                     timeframe="18-30 months",
-                    focus="Layer in resilience and renewable integration projects",
-                    actions=later,
+                    focus="Layer in resilience upgrades and prep for renewable integration",
+                    actions=future,
+                )
+            )
+
+        if not phases:
+            phases.append(
+                ImplementationPhase(
+                    name="Kickoff",
+                    timeframe="0-6 months",
+                    focus="Begin with foundational diagnostics to guide next steps",
+                    actions=[action.title for action in actions],
                 )
             )
 
         return phases
 
     def _financing_options(
-        self, request: HomeQuestRequest, actions: List[UpgradeAction]
+        self, request: HomeQuestRequest, actions: List[UpgradeAction], total_cost: float
     ) -> List[FinancingOption]:
         annual_budget = request.annual_budget or 10000
-        total_cost = sum(action.estimated_cost for action in actions)
 
         options: List[FinancingOption] = [
             FinancingOption(
@@ -452,7 +580,33 @@ class HomeQuestPlanner:
                 )
             )
 
+        if total_cost >= 15000:
+            options.append(
+                FinancingOption(
+                    name="Performance contract support",
+                    description=(
+                        "Bundle multiple measures into a single scope with shared savings"
+                        " agreements from qualified contractors."
+                    ),
+                    option_type="service",
+                    eligibility="Homeowners pursuing multi-measure projects above $15k",
+                )
+            )
+
         return options
+
+    def _build_financial_summary(self, selection: _PlanSelection) -> PlanFinancialSummary:
+        total_cost = round(selection.total_cost, 2)
+        total_savings = round(selection.total_savings, 2)
+        payback = None
+        if total_savings > 0:
+            payback = round(total_cost / total_savings, 1)
+
+        return PlanFinancialSummary(
+            total_estimated_cost=total_cost,
+            total_estimated_annual_savings=total_savings,
+            simple_payback_years=payback,
+        )
 
     def _summarise_home(self, request: HomeQuestRequest) -> HomeSummary:
         home = request.home
@@ -480,9 +634,14 @@ class HomeQuestPlanner:
         )
 
     def _create_narrative(
-        self, request: HomeQuestRequest, actions: List[UpgradeAction], target_score: int
+        self,
+        request: HomeQuestRequest,
+        selection: _PlanSelection,
+        target_score: int,
+        financial_summary: PlanFinancialSummary,
     ) -> str:
         home = request.home
+        actions = selection.actions
         sentences = [
             (
                 f"HomeQuest analysed {home.name} in {home.city}, {home.state} and mapped a "
@@ -505,6 +664,21 @@ class HomeQuestPlanner:
             sentences.append(
                 f"The first priority is {lead.title.lower()} with estimated annual savings of "
                 f"${lead.estimated_annual_savings:,.0f}."
+            )
+            if len(actions) > 1:
+                sentences.append(
+                    f"The roadmap spans {len(actions)} upgrades sequenced for impact and feasibility."
+                )
+
+        if financial_summary.simple_payback_years is not None:
+            sentences.append(
+                f"Investing roughly ${financial_summary.total_estimated_cost:,.0f} "
+                f"yields a simple payback of about {financial_summary.simple_payback_years:.1f} years."
+            )
+        else:
+            sentences.append(
+                f"Investing roughly ${financial_summary.total_estimated_cost:,.0f} focuses on comfort "
+                "and resilience benefits that are harder to monetise but critical for homeowners."
             )
 
         sentences.append(

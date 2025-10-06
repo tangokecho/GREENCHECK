@@ -147,12 +147,25 @@ class HomeSummary(BaseModel):
     narrative_highlights: List[str]
 
 
+class PlanFinancialSummary(BaseModel):
+    """Aggregated view of how the plan performs financially."""
+
+    total_estimated_cost: float = Field(..., ge=0)
+    total_estimated_annual_savings: float = Field(..., ge=0)
+    simple_payback_years: Optional[float] = Field(
+        None,
+        description="Years for savings to cover cost; omitted if savings are zero.",
+        ge=0,
+    )
+
+
 class HomeQuestPlan(BaseModel):
     """Full response returned to clients after running the planner."""
 
     plan_id: str
     home_summary: HomeSummary
     scorecard: ScoreCard
+    financial_summary: PlanFinancialSummary
     priority_actions: List[UpgradeAction]
     phased_timeline: List[ImplementationPhase]
     financing: List[FinancingOption]

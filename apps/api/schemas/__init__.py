@@ -11,6 +11,7 @@ from .homequest import (
     ImplementationPhase,
     InsulationLevel,
     OccupancyType,
+    PlanFinancialSummary,
     ScoreCard,
     UpgradeAction,
 )
@@ -26,6 +27,7 @@ __all__ = [
     "ImplementationPhase",
     "InsulationLevel",
     "OccupancyType",
+    "PlanFinancialSummary",
     "ScoreCard",
     "UpgradeAction",
 ]
