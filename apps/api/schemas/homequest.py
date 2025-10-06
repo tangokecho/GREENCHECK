@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Dict, List, Optional
 
-from pydantic import BaseModel, Field, PositiveFloat, PositiveInt, validator
+from pydantic import BaseModel, Field, PositiveFloat, PositiveInt, field_validator
 
 
 class GoalType(str, Enum):
@@ -41,7 +41,7 @@ class HomeProfile(BaseModel):
     address: str = Field(..., description="Street address for context in the narrative output")
     city: str
     state: str = Field(..., min_length=2, max_length=2, description="Two letter state code")
-    postal_code: str = Field(..., regex=r"^\d{5}$", description="US ZIP code")
+    postal_code: str = Field(..., pattern=r"^\d{5}$", description="US ZIP code")
     occupancy_type: OccupancyType = OccupancyType.SINGLE_FAMILY
     square_feet: PositiveInt
     built_year: int = Field(..., ge=1850, le=2050)
@@ -62,7 +62,7 @@ class HomeProfile(BaseModel):
         None, description="Any custom context that should show up in the narrative"
     )
 
-    @validator("built_year")
+    @field_validator("built_year")
     def validate_built_year(cls, value: int) -> int:
         if value > 2050:
             raise ValueError("built_year must be in the past")

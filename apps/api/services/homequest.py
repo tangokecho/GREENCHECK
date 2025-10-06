@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Tuple
+from datetime import date
+from typing import Callable, Dict, Iterable, List, Sequence, Tuple
 
 from ..schemas.homequest import (
     FinancingOption,
     GoalDefinition,
     GoalType,
+    HomeProfile,
     HomeQuestPlan,
     HomeQuestRequest,
     HomeSummary,
@@ -21,12 +23,53 @@ from ..schemas.homequest import (
 
 
 @dataclass(frozen=True)
-class _GoalDescriptor:
-    """Internal representation of each HomeQuest goal."""
+class _GoalInfo:
+    """Internal representation of a HomeQuest goal."""
 
     definition: GoalDefinition
-    bonus_score: int
-    narrative_hook: str
+    score_boost: int
+    narrative: str
+
+
+@dataclass(frozen=True)
+class _ActionTemplate:
+    """Configuration used to build an upgrade recommendation."""
+
+    id: str
+    title: str
+    description: str
+    impact_level: str
+    difficulty: str
+    base_cost: float
+    base_savings: float
+    incentives: Sequence[str]
+    dependencies: Sequence[str]
+    applies: Callable[[HomeProfile, HomeQuestRequest], bool]
+    goal_weights: Dict[GoalType, int]
+
+    def priority_weight(self, goals: Iterable[GoalType]) -> float:
+        weight = 1.0
+        for goal in goals:
+            weight += self.goal_weights.get(goal, 0)
+        if self.impact_level == "high":
+            weight += 0.75
+        elif self.impact_level == "medium":
+            weight += 0.25
+        return weight
+
+    def build_action(self, home: HomeProfile) -> UpgradeAction:
+        scale = max(0.6, min(1.6, home.square_feet / 2000))
+        return UpgradeAction(
+            id=self.id,
+            title=self.title,
+            description=self.description,
+            impact_level=self.impact_level,
+            difficulty=self.difficulty,
+            estimated_cost=round(self.base_cost * scale, 2),
+            estimated_annual_savings=round(self.base_savings * scale, 2),
+            incentives=list(self.incentives),
+            dependencies=list(self.dependencies),
+        )
 
 
 class HomeQuestPlanner:
@@ -34,91 +77,8 @@ class HomeQuestPlanner:
 
     def __init__(self) -> None:
         self._plans: Dict[str, HomeQuestPlan] = {}
-        self._goal_library: Dict[GoalType, _GoalDescriptor] = {
-            GoalType.LOWER_BILLS: _GoalDescriptor(
-                definition=GoalDefinition(
-                    goal=GoalType.LOWER_BILLS,
-                    title="Slash monthly utility bills",
-                    description=(
-                        "Reduce wasted energy through envelope sealing, smart controls, "
-                        "and high-efficiency equipment upgrades."
-                    ),
-                    success_indicators=[
-                        "15%+ reduction in annual energy spend",
-                        "Tighter building envelope (ACH50 < 5)",
-                        "Right-sized HVAC systems matched to load"
-                    ],
-                ),
-                bonus_score=8,
-                narrative_hook=(
-                    "Right-sizing equipment and cutting air leakage creates predictable, "
-                    "lower energy bills year-round."
-                ),
-            ),
-            GoalType.COMFORT: _GoalDescriptor(
-                definition=GoalDefinition(
-                    goal=GoalType.COMFORT,
-                    title="Elevate comfort",
-                    description=(
-                        "Focus on steady indoor temperatures, healthy ventilation, and "
-                        "draft-free rooms."
-                    ),
-                    success_indicators=[
-                        "Consistent room-to-room temperatures",
-                        "Balanced humidity through ventilation",
-                        "Reduced noise from mechanical systems",
-                    ],
-                ),
-                bonus_score=5,
-                narrative_hook="Air sealing and variable-speed systems stabilise comfort without spikes in usage.",
-            ),
-            GoalType.RESILIENCE: _GoalDescriptor(
-                definition=GoalDefinition(
-                    goal=GoalType.RESILIENCE,
-                    title="Boost resilience",
-                    description=(
-                        "Plan for backup power, grid flexibility, and the ability to ride out disruptions."
-                    ),
-                    success_indicators=[
-                        "At least one day of critical load coverage",
-                        "Ability to island with solar or battery backup",
-                        "Active load management for peak demand",
-                    ],
-                ),
-                bonus_score=4,
-                narrative_hook="Solar-ready wiring and storage-ready panels support resilience upgrades later on.",
-            ),
-            GoalType.DECARBONIZE: _GoalDescriptor(
-                definition=GoalDefinition(
-                    goal=GoalType.DECARBONIZE,
-                    title="Decarbonise the property",
-                    description=(
-                        "Electrify end uses, integrate renewables, and shrink total carbon emissions."
-                    ),
-                    success_indicators=[
-                        "100% electric space and water heating",
-                        "Grid-supplied energy from renewable sources",
-                        "Verified greenhouse gas reduction year-over-year",
-                    ],
-                ),
-                bonus_score=7,
-                narrative_hook="Electrification prepares the home for clean power while shrinking emissions.",
-            ),
-            GoalType.ELECTRIFY: _GoalDescriptor(
-                definition=GoalDefinition(
-                    goal=GoalType.ELECTRIFY,
-                    title="Electrify everything",
-                    description="Transition off fossil-fuel appliances with high efficiency electric alternatives.",
-                    success_indicators=[
-                        "Dual-fuel or fossil appliances replaced with heat pump technology",
-                        "Electrical panel has capacity for new loads",
-                        "EV-ready outlet accessible on-site",
-                    ],
-                ),
-                bonus_score=6,
-                narrative_hook="Panel upgrades and heat pump technology unlock all-electric living.",
-            ),
-        }
+        self._goal_library: Dict[GoalType, _GoalInfo] = self._build_goal_library()
+        self._action_templates: List[_ActionTemplate] = self._build_action_templates()
 
     # ------------------------------------------------------------------
     # Public API
@@ -126,19 +86,21 @@ class HomeQuestPlanner:
     def list_goal_definitions(self) -> List[GoalDefinition]:
         """Return the configured goal catalogue."""
 
-        return [descriptor.definition for descriptor in self._goal_library.values()]
+        return [info.definition for info in self._goal_library.values()]
 
     def create_plan(self, request: HomeQuestRequest) -> HomeQuestPlan:
         """Build a fully-populated HomeQuest plan from the provided request."""
 
         plan_id = str(uuid.uuid4())
-        baseline_score = self._compute_baseline_score(request)
-        target_score = min(95, baseline_score + self._score_boost_for_goals(request.goals))
-        estimated_savings, carbon_reduction = self._estimate_savings_and_carbon(request, target_score)
+        baseline_score = self._compute_baseline_score(request.home)
+        target_score = min(98, baseline_score + self._score_boost_for_goals(request.goals))
+        estimated_savings, carbon_reduction = self._estimate_savings_and_carbon(
+            request.home.average_monthly_bill, baseline_score, target_score
+        )
 
-        actions = self._determine_actions(request, baseline_score)
+        actions = self._determine_actions(request)
         timeline = self._build_timeline(actions)
-        financing = self._financing_options(request)
+        financing = self._financing_options(request, actions)
 
         plan = HomeQuestPlan(
             plan_id=plan_id,
@@ -168,276 +130,332 @@ class HomeQuestPlanner:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+    def _build_goal_library(self) -> Dict[GoalType, _GoalInfo]:
+        return {
+            GoalType.LOWER_BILLS: _GoalInfo(
+                definition=GoalDefinition(
+                    goal=GoalType.LOWER_BILLS,
+                    title="Lower monthly bills",
+                    description="Identify envelope and equipment upgrades that shrink utility spend.",
+                    success_indicators=[
+                        "15% reduction in annual energy cost",
+                        "Measured reduction in air leakage",
+                        "Efficient HVAC matched to home load",
+                    ],
+                ),
+                score_boost=8,
+                narrative="The roadmap targets measures that reliably trim ongoing utility costs.",
+            ),
+            GoalType.COMFORT: _GoalInfo(
+                definition=GoalDefinition(
+                    goal=GoalType.COMFORT,
+                    title="Improve comfort",
+                    description="Promote even temperatures, balanced ventilation, and quieter operation.",
+                    success_indicators=[
+                        "Room-to-room temperature swings under 2°F",
+                        "Continuous balanced ventilation",
+                        "Reduced equipment cycling noise",
+                    ],
+                ),
+                score_boost=6,
+                narrative="Comfort-focused measures keep temperatures stable and ventilation balanced.",
+            ),
+            GoalType.RESILIENCE: _GoalInfo(
+                definition=GoalDefinition(
+                    goal=GoalType.RESILIENCE,
+                    title="Build resilience",
+                    description="Add backup capacity and load management for outages or peak events.",
+                    success_indicators=[
+                        "Critical loads supported for at least 8 hours",
+                        "Ability to island with storage or generator",
+                        "Automated load shedding during grid events",
+                    ],
+                ),
+                score_boost=5,
+                narrative="Resilience upgrades make sure critical circuits stay online during disruptions.",
+            ),
+            GoalType.DECARBONIZE: _GoalInfo(
+                definition=GoalDefinition(
+                    goal=GoalType.DECARBONIZE,
+                    title="Decarbonise the property",
+                    description="Electrify major loads and prepare for clean onsite generation.",
+                    success_indicators=[
+                        "Space and water heating delivered by electric equipment",
+                        "Electrical system sized for renewable capacity",
+                        "Documented decline in emissions year over year",
+                    ],
+                ),
+                score_boost=7,
+                narrative="Electrification and solar readiness move the home toward low-carbon operations.",
+            ),
+            GoalType.ELECTRIFY: _GoalInfo(
+                definition=GoalDefinition(
+                    goal=GoalType.ELECTRIFY,
+                    title="Electrify appliances",
+                    description="Swap fossil-fuel appliances for efficient electric alternatives.",
+                    success_indicators=[
+                        "Combustion appliances replaced with heat pump technology",
+                        "Panel capacity available for new loads",
+                        "Charging infrastructure ready for EV adoption",
+                    ],
+                ),
+                score_boost=6,
+                narrative="Panel and appliance upgrades unlock an all-electric home footprint.",
+            ),
+        }
+
+    def _build_action_templates(self) -> List[_ActionTemplate]:
+        return [
+            _ActionTemplate(
+                id="envelope-upgrade",
+                title="Seal leaks and add insulation",
+                description="Air seal the envelope and top up attic insulation to cut infiltration.",
+                impact_level="high",
+                difficulty="moderate",
+                base_cost=3200,
+                base_savings=260,
+                incentives=("IRA 25C insulation tax credit",),
+                dependencies=(),
+                applies=lambda home, _req: home.insulation_level != InsulationLevel.GOOD,
+                goal_weights={
+                    GoalType.LOWER_BILLS: 3,
+                    GoalType.COMFORT: 2,
+                },
+            ),
+            _ActionTemplate(
+                id="heat-pump",
+                title="Install high-efficiency heat pump",
+                description="Replace legacy fossil systems with a variable-speed cold-climate heat pump.",
+                impact_level="high",
+                difficulty="high",
+                base_cost=9600,
+                base_savings=410,
+                incentives=("Federal heat pump tax credit",),
+                dependencies=("envelope-upgrade",),
+                applies=lambda home, req: "heat pump" not in home.hvac_type.lower()
+                or GoalType.ELECTRIFY in req.goals,
+                goal_weights={
+                    GoalType.DECARBONIZE: 3,
+                    GoalType.ELECTRIFY: 4,
+                    GoalType.LOWER_BILLS: 1,
+                },
+            ),
+            _ActionTemplate(
+                id="panel-upgrade",
+                title="Expand electrical panel capacity",
+                description="Upgrade service panel and add dedicated circuits for future electric loads.",
+                impact_level="medium",
+                difficulty="high",
+                base_cost=3400,
+                base_savings=70,
+                incentives=("Utility make-ready rebate",),
+                dependencies=(),
+                applies=lambda home, req: home.has_ev_charger or GoalType.ELECTRIFY in req.goals,
+                goal_weights={
+                    GoalType.ELECTRIFY: 3,
+                    GoalType.RESILIENCE: 1,
+                },
+            ),
+            _ActionTemplate(
+                id="balanced-ventilation",
+                title="Install balanced ventilation",
+                description="Add an energy recovery ventilator with smart controls for humidity balance.",
+                impact_level="medium",
+                difficulty="moderate",
+                base_cost=4700,
+                base_savings=110,
+                incentives=("Ventilation equipment credit",),
+                dependencies=(),
+                applies=lambda _home, req: GoalType.COMFORT in req.goals,
+                goal_weights={
+                    GoalType.COMFORT: 4,
+                    GoalType.RESILIENCE: 1,
+                },
+            ),
+            _ActionTemplate(
+                id="solar-ready",
+                title="Prepare for rooftop solar",
+                description="Run conduit, reserve wall space, and ready the roof for solar and storage.",
+                impact_level="medium",
+                difficulty="moderate",
+                base_cost=4100,
+                base_savings=160,
+                incentives=("30% Investment Tax Credit",),
+                dependencies=(),
+                applies=lambda home, req: not home.has_rooftop_solar
+                and GoalType.DECARBONIZE in req.goals,
+                goal_weights={
+                    GoalType.DECARBONIZE: 3,
+                    GoalType.RESILIENCE: 2,
+                },
+            ),
+            _ActionTemplate(
+                id="resilience-kit",
+                title="Add critical load backup kit",
+                description="Pair smart load management with storage-ready inverter for outages.",
+                impact_level="medium",
+                difficulty="moderate",
+                base_cost=7200,
+                base_savings=80,
+                incentives=("Virtual power plant revenue opportunities",),
+                dependencies=("solar-ready",),
+                applies=lambda _home, req: GoalType.RESILIENCE in req.goals,
+                goal_weights={
+                    GoalType.RESILIENCE: 4,
+                },
+            ),
+            _ActionTemplate(
+                id="diagnostic-audit",
+                title="Complete diagnostic energy audit",
+                description="Deploy smart monitoring and load calculations to sequence retrofits.",
+                impact_level="medium",
+                difficulty="low",
+                base_cost=650,
+                base_savings=75,
+                incentives=(),
+                dependencies=(),
+                applies=lambda _home, _req: True,
+                goal_weights={},
+            ),
+        ]
+
     def _score_boost_for_goals(self, goals: Iterable[GoalType]) -> int:
-        bonus = 10  # baseline improvement expectation even with a single goal
+        base = 10
         for goal in goals:
-            descriptor = self._goal_library.get(goal)
-            if descriptor:
-                bonus += descriptor.bonus_score
-        return min(bonus, 35)
+            info = self._goal_library.get(goal)
+            if info:
+                base += info.score_boost
+        return min(base, 32)
 
-    def _compute_baseline_score(self, request: HomeQuestRequest) -> int:
-        home = request.home
-        score = 78
+    def _compute_baseline_score(self, home: HomeProfile) -> int:
+        current_year = date.today().year
+        score = 75
 
-        age_penalty = max(0, (2024 - home.built_year) // 20)
-        score -= min(age_penalty * 2, 20)
+        age_penalty = max(0, (current_year - home.built_year) // 15)
+        score -= min(age_penalty * 2, 18)
 
         if home.insulation_level == InsulationLevel.POOR:
             score -= 12
         elif home.insulation_level == InsulationLevel.AVERAGE:
-            score -= 4
+            score -= 5
 
-        if "furnace" in home.hvac_type.lower():
+        hvac = home.hvac_type.lower()
+        if "furnace" in hvac or "boiler" in hvac:
             score -= 6
-        if "window" in home.hvac_type.lower():
-            score -= 4
-        if "heat pump" in home.hvac_type.lower():
-            score += 5
+        elif "heat pump" in hvac:
+            score += 4
 
         if not home.has_rooftop_solar:
             score -= 2
 
-        score = max(35, min(score, 88))
-        return score
+        return max(30, min(score, 90))
 
     def _estimate_savings_and_carbon(
-        self, request: HomeQuestRequest, target_score: int
+        self, monthly_bill: float, baseline_score: int, target_score: int
     ) -> Tuple[float, float]:
-        monthly_bill = request.home.average_monthly_bill
-        savings_ratio = max(0.12, min(0.32, (target_score - 50) / 200))
-        estimated_annual_savings = monthly_bill * 12 * savings_ratio
-        carbon_reduction = estimated_annual_savings / 1000 * 0.5
-        return estimated_annual_savings, carbon_reduction
+        annual_bill = monthly_bill * 12
+        improvement_ratio = max(target_score - baseline_score, 0) / 100
+        estimated_savings = annual_bill * (0.1 + improvement_ratio * 0.4)
+        carbon_reduction = estimated_savings * 0.00045 * 12
+        return estimated_savings, carbon_reduction
 
-    def _determine_actions(
-        self, request: HomeQuestRequest, baseline_score: int
-    ) -> List[UpgradeAction]:
+    def _determine_actions(self, request: HomeQuestRequest) -> List[UpgradeAction]:
         home = request.home
-        actions: List[UpgradeAction] = []
+        ranked: List[Tuple[float, UpgradeAction]] = []
+        for template in self._action_templates:
+            if template.applies(home, request):
+                weight = template.priority_weight(request.goals)
+                ranked.append((weight, template.build_action(home)))
 
-        def add_action(action: UpgradeAction) -> None:
-            actions.append(action)
+        if not ranked:
+            ranked.append((1.0, self._action_templates[-1].build_action(home)))
 
-        sq_ft_factor = home.square_feet / 2000
-
-        # Envelope upgrades
-        if home.insulation_level in {InsulationLevel.POOR, InsulationLevel.AVERAGE}:
-            add_action(
-                UpgradeAction(
-                    id="envelope-upgrade",
-                    title="Seal and insulate the envelope",
-                    description=(
-                        "Comprehensive blower-door guided air sealing, attic insulation "
-                        "top-up, and rim joist treatment to slash infiltration."
-                    ),
-                    impact_level="high",
-                    difficulty="moderate",
-                    estimated_cost=3500 * sq_ft_factor,
-                    estimated_annual_savings=max(180.0, 280.0 * sq_ft_factor),
-                    incentives=[
-                        "IRA Section 25C insulation tax credit",
-                        "DCSEU Home Performance rebates",
-                    ],
-                )
-            )
-
-        if "furnace" in home.hvac_type.lower() or GoalType.ELECTRIFY in request.goals:
-            add_action(
-                UpgradeAction(
-                    id="heat-pump",
-                    title="Install cold-climate heat pump",
-                    description=(
-                        "Replace aging fossil systems with a variable-speed cold-climate "
-                        "heat pump sized via Manual J to maintain comfort down to 5°F."
-                    ),
-                    impact_level="high",
-                    difficulty="high",
-                    estimated_cost=9800 * sq_ft_factor,
-                    estimated_annual_savings=max(320.0, 420.0 * sq_ft_factor),
-                    incentives=[
-                        "Federal 25C heat pump credit",
-                        "Utility demand response enrollment bonus",
-                    ],
-                    dependencies=["envelope-upgrade"],
-                )
-            )
-
-        if not home.has_rooftop_solar and GoalType.DECARBONIZE in request.goals:
-            add_action(
-                UpgradeAction(
-                    id="solar-ready",
-                    title="Prepare for rooftop solar + storage",
-                    description=(
-                        "Upgrade electrical panel, run conduit to roof, and reserve wall "
-                        "space for a future battery to enable net-zero capability."
-                    ),
-                    impact_level="medium",
-                    difficulty="moderate",
-                    estimated_cost=4200,
-                    estimated_annual_savings=150.0,
-                    incentives=[
-                        "30% Investment Tax Credit",
-                        "Solar Renewable Energy Credit (SREC) revenue",
-                    ],
-                )
-            )
-
-        if GoalType.RESILIENCE in request.goals:
-            add_action(
-                UpgradeAction(
-                    id="resilience-package",
-                    title="Critical load resilience kit",
-                    description=(
-                        "Pair smart panel monitoring with a hybrid inverter and small "
-                        "battery to back up refrigeration, medical devices, and Wi-Fi."
-                    ),
-                    impact_level="medium",
-                    difficulty="moderate",
-                    estimated_cost=7500,
-                    estimated_annual_savings=80.0,
-                    incentives=["Grid service revenue through VPP programs"],
-                    dependencies=["solar-ready"],
-                )
-            )
-
-        if GoalType.COMFORT in request.goals:
-            add_action(
-                UpgradeAction(
-                    id="ventilation-upgrade",
-                    title="Add balanced ventilation + smart controls",
-                    description=(
-                        "Install an Energy Recovery Ventilator with smart, room-based "
-                        "controls to balance humidity and fresh air."
-                    ),
-                    impact_level="medium",
-                    difficulty="moderate",
-                    estimated_cost=4800,
-                    estimated_annual_savings=95.0,
-                    incentives=["IRA ventilation equipment credit"],
-                )
-            )
-
-        if home.has_ev_charger or GoalType.ELECTRIFY in request.goals:
-            add_action(
-                UpgradeAction(
-                    id="panel-upgrade",
-                    title="Upgrade electrical panel + circuits",
-                    description=(
-                        "Expand service panel to 200A, add dedicated EV-ready circuit, "
-                        "and install monitoring to track new loads."
-                    ),
-                    impact_level="medium",
-                    difficulty="high",
-                    estimated_cost=3600,
-                    estimated_annual_savings=65.0,
-                    incentives=["Utility EV charger make-ready rebate"],
-                )
-            )
-
-        if not actions:
-            add_action(
-                UpgradeAction(
-                    id="smart-audit",
-                    title="Comprehensive smart energy audit",
-                    description=(
-                        "Benchmark the property with smart sensors, load disaggregation, "
-                        "and a Manual J load calc to confirm next retrofit steps."
-                    ),
-                    impact_level="medium",
-                    difficulty="low",
-                    estimated_cost=750,
-                    estimated_annual_savings=80.0,
-                )
-            )
-
-        # Prioritise by impact first, then savings.
-        actions.sort(
-            key=lambda action: (
-                0 if action.impact_level == "high" else 1,
-                -action.estimated_annual_savings,
-            )
-        )
-
-        return actions
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        return [action for _weight, action in ranked]
 
     def _build_timeline(self, actions: List[UpgradeAction]) -> List[ImplementationPhase]:
         if not actions:
             return []
 
         phases: List[ImplementationPhase] = []
-
-        # Phase 1: first two actions
-        first_actions = [action.title for action in actions[:2]]
+        first_wave = [action.title for action in actions[:2]]
         phases.append(
             ImplementationPhase(
-                name="Stabilise & Audit",
-                timeframe="0-3 months",
-                focus="Knock out diagnostics and quick envelope wins",
-                actions=first_actions,
+                name="Kickoff",
+                timeframe="0-6 months",
+                focus="Start with audits and quick efficiency wins",
+                actions=first_wave,
             )
         )
 
         if len(actions) > 2:
-            mid_actions = [action.title for action in actions[2:4]]
+            middle = [action.title for action in actions[2:5]]
             phases.append(
                 ImplementationPhase(
-                    name="Deep Retrofit",
-                    timeframe="4-12 months",
-                    focus="Tackle HVAC and ventilation upgrades with contractors",
-                    actions=mid_actions,
+                    name="Deep retrofits",
+                    timeframe="6-18 months",
+                    focus="Schedule mechanical upgrades and ventilation improvements",
+                    actions=middle,
                 )
             )
 
-        if len(actions) > 4:
-            remaining = [action.title for action in actions[4:]]
+        if len(actions) > 5:
+            later = [action.title for action in actions[5:]]
             phases.append(
                 ImplementationPhase(
-                    name="Future Proof",
-                    timeframe="12-24 months",
-                    focus="Layer on resilience, solar, and smart load management",
-                    actions=remaining,
+                    name="Future readiness",
+                    timeframe="18-30 months",
+                    focus="Layer in resilience and renewable integration projects",
+                    actions=later,
                 )
             )
 
         return phases
 
-    def _financing_options(self, request: HomeQuestRequest) -> List[FinancingOption]:
+    def _financing_options(
+        self, request: HomeQuestRequest, actions: List[UpgradeAction]
+    ) -> List[FinancingOption]:
         annual_budget = request.annual_budget or 10000
+        total_cost = sum(action.estimated_cost for action in actions)
+
         options: List[FinancingOption] = [
             FinancingOption(
                 name="Inflation Reduction Act incentives",
-                description=(
-                    "Stack 25C tax credits for heat pumps, insulation, and ventilation with "
-                    "state-level rebates to offset upfront costs."
-                ),
+                description="Combine 25C tax credits with local rebates to offset upfront costs.",
                 option_type="incentive",
-                eligibility="Owner-occupied primary residence with qualifying equipment",
+                eligibility="Owner-occupied residences installing qualifying equipment",
             ),
             FinancingOption(
-                name="On-bill repayment or PACE",
-                description=(
-                    "Finance deeper retrofits through Property Assessed Clean Energy or "
-                    "utility on-bill tariffs, keeping payments neutral to savings."
-                ),
-                option_type="financing",
-                eligibility="Property tax current, energy audit completed in last 24 months",
-            ),
-            FinancingOption(
-                name="Green lending partners",
-                description=(
-                    "Mission-driven credit unions offer low-interest loans for projects "
-                    "with clear comfort and health benefits."
-                ),
+                name="Green loan partners",
+                description="Credit unions and CDFIs offer low-interest financing for energy projects.",
                 option_type="loan",
-                eligibility="Budget need above ${:,.0f} with credit score 640+".format(annual_budget),
+                eligibility="Borrowers with credit score 640+ and clear retrofit scope",
             ),
         ]
+
+        if total_cost > annual_budget:
+            options.append(
+                FinancingOption(
+                    name="PACE or on-bill financing",
+                    description="Repay upgrades over time through property taxes or utility billing.",
+                    option_type="financing",
+                    eligibility="Property taxes current and recent energy audit on file",
+                )
+            )
+        else:
+            options.append(
+                FinancingOption(
+                    name="Pay-as-you-save",
+                    description="Phase work to stay within available cash flow while capturing incentives.",
+                    option_type="cash-flow",
+                    eligibility=f"Projects under ${annual_budget:,.0f} in annual spend",
+                )
+            )
+
         return options
 
     def _summarise_home(self, request: HomeQuestRequest) -> HomeSummary:
         home = request.home
-        location = f"{home.city}, {home.state}"
         highlights = [
             f"{home.square_feet:,} sq ft {home.occupancy_type.value.replace('_', ' ')}",
             f"Average bill ${home.average_monthly_bill:,.0f}/month",
@@ -454,7 +472,7 @@ class HomeQuestPlanner:
 
         return HomeSummary(
             property_name=home.name,
-            location=location,
+            location=f"{home.city}, {home.state}",
             size_sq_ft=home.square_feet,
             build_vintage=f"Built in {home.built_year}",
             current_systems=current_systems,
@@ -468,34 +486,32 @@ class HomeQuestPlanner:
         sentences = [
             (
                 f"HomeQuest analysed {home.name} in {home.city}, {home.state} and mapped a "
-                f"pathway to lift the efficiency score to {target_score}."
+                f"pathway to reach a score of {target_score}."
             )
         ]
 
         if request.preferred_timeline_months:
             sentences.append(
-                f"The phased roadmap is tuned to finish within {request.preferred_timeline_months} months."
+                f"The timeline is paced to finish within {request.preferred_timeline_months} months."
             )
 
         for goal in request.goals:
-            descriptor = self._goal_library.get(goal)
-            if descriptor:
-                sentences.append(descriptor.narrative_hook)
+            info = self._goal_library.get(goal)
+            if info:
+                sentences.append(info.narrative)
 
         if actions:
-            top_action = actions[0]
+            lead = actions[0]
             sentences.append(
-                f"The first priority is {top_action.title.lower()} delivering roughly "
-                f"${top_action.estimated_annual_savings:,.0f} in annual savings."
+                f"The first priority is {lead.title.lower()} with estimated annual savings of "
+                f"${lead.estimated_annual_savings:,.0f}."
             )
 
         sentences.append(
-            "HomeQuest keeps progress stored with this plan so the homeowner can revisit "
-            "and refresh recommendations as new incentives roll out."
+            "Plans remain stored so homeowners can revisit recommendations as incentives evolve."
         )
 
-        return " " .join(sentences)
+        return " ".join(sentences)
 
 
 planner = HomeQuestPlanner()
-
