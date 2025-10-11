@@ -3,35 +3,110 @@
 
 Utility to scaffold an Actionuity "FAM Command Center" workspace in Notion.
 
-The script expects two environment variables to be set:
-- NOTION_TOKEN: The Notion integration token with permissions to create
-  pages and databases in the target workspace.
-- NOTION_PARENT_PAGE_ID: The identifier for the parent page where the
-  Command Center page should be created.
+Quick start checklist:
+1. Create a Notion internal integration and share the destination parent page
+   with it so the integration can create content. Copy the integration secret
+   as ``NOTION_TOKEN``.
+2. Open the parent page (or database) where you want the Command Center to
+   live, copy its URL, and extract the 32-character identifier after the last
+   slash. That becomes ``NOTION_PARENT_PAGE_ID``.
+3. Export both values in your shell, or add them to a ``.env`` file that you
+   load before running the script.
+4. Run ``python create_fam_command_center.py`` to provision the workspace. Use
+   ``python create_fam_command_center.py --instructions`` at any time to print
+   the detailed setup guide.
 
-Running the script will create:
+The script creates:
 1. A new page titled "FAM Command Center" under the provided parent page.
 2. Five child databases for projects, loops, tasks, logs, and intelligence.
 3. Relations, rollups, and formulas connecting the databases.
 4. Sample entries in each database to demonstrate usage.
 5. Basic instructional content on the Command Center page.
-
-Example usage:
-    export NOTION_TOKEN="secret_xxx"
-    export NOTION_PARENT_PAGE_ID="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-    python create_fam_command_center.py
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
+import textwrap
 from typing import Any, Dict, List, Optional
 
-import requests
+try:
+    import requests
+except ModuleNotFoundError as exc:  # pragma: no cover - dependency availability check
+    requests = None  # type: ignore[assignment]
+    _REQUESTS_IMPORT_ERROR = exc
+else:
+    _REQUESTS_IMPORT_ERROR = None
 
 API_BASE = "https://api.notion.com/v1"
 NOTION_VERSION = "2022-06-28"
+
+
+def _usage_instructions() -> str:
+    """Return a formatted description of the setup workflow."""
+
+    return textwrap.dedent(
+        """
+        FAM Command Center — setup guide
+        =================================
+
+        1. Create a Notion internal integration
+           • Visit https://www.notion.so/my-integrations, click *New integration*,
+             and choose the workspace where the Command Center should live.
+           • Copy the "Internal Integration Token" and store it securely. Set it
+             as the environment variable NOTION_TOKEN before running the script.
+
+        2. Share your target parent page with the integration
+           • Open the page in Notion that will contain the Command Center.
+           • Use *Share → Invite* and add your integration. The integration must
+             have permission to create pages and databases within that location.
+
+        3. Capture the parent page ID
+           • With the page open in a browser, copy its URL and remove any query
+             parameters. The final path segment (after the last "/") is the
+             parent ID. Example: https://www.notion.so/Workspace/Page-Name-
+             0123456789abcdef0123456789abcdef → the ID is the final 32 characters.
+           • Export this as NOTION_PARENT_PAGE_ID (without dashes).
+
+        4. Install dependencies (once per environment)
+           • ``pip install -r requirements.txt`` ensures the ``requests`` package
+             is available.
+
+        5. Run the script
+           • ``python create_fam_command_center.py``
+           • The script provisions the page, creates all databases, links them,
+             seeds sample content, and prints the IDs of the created resources.
+
+        6. Finish in the Notion UI
+           • Add views (board, calendar, etc.) to each database.
+           • Configure any sharing or permissions required for your team.
+        """
+    ).strip()
+
+
+def _parse_args() -> argparse.Namespace:
+    """Parse command-line arguments for the script."""
+
+    parser = argparse.ArgumentParser(
+        description="Provision the Actionuity FAM Command Center structure in Notion.",
+    )
+    parser.add_argument(
+        "--instructions",
+        action="store_true",
+        help="Print a detailed setup guide and exit without calling the Notion API.",
+    )
+    return parser.parse_args()
+
+
+def _ensure_requests() -> None:
+    """Ensure the optional requests dependency is available before API calls."""
+
+    if requests is None:  # pragma: no cover - runtime guard
+        raise RuntimeError(
+            "Missing dependency 'requests'. Install requirements with 'pip install -r requirements.txt'",
+        ) from _REQUESTS_IMPORT_ERROR
 
 
 def _headers() -> Dict[str, str]:
@@ -46,7 +121,8 @@ def _headers() -> Dict[str, str]:
 
 
 def _post(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    response = requests.post(
+    _ensure_requests()
+    response = requests.post(  # type: ignore[call-arg]
         f"{API_BASE}{path}",
         headers=_headers(),
         data=json.dumps(payload),
@@ -58,7 +134,8 @@ def _post(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _patch(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    response = requests.patch(
+    _ensure_requests()
+    response = requests.patch(  # type: ignore[call-arg]
         f"{API_BASE}{path}",
         headers=_headers(),
         data=json.dumps(payload),
@@ -70,7 +147,8 @@ def _patch(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _append_blocks(block_id: str, children: List[Dict[str, Any]]) -> Dict[str, Any]:
-    response = requests.patch(
+    _ensure_requests()
+    response = requests.patch(  # type: ignore[call-arg]
         f"{API_BASE}/blocks/{block_id}/children",
         headers=_headers(),
         data=json.dumps({"children": children}),
@@ -508,6 +586,11 @@ def decorate_command_center(command_center_page_id: str) -> None:
 
 
 def main() -> None:
+    args = _parse_args()
+    if args.instructions:
+        print(_usage_instructions())
+        return
+
     parent_page_id = os.environ.get("NOTION_PARENT_PAGE_ID")
     if not parent_page_id:
         raise RuntimeError("Missing NOTION_PARENT_PAGE_ID environment variable.")
