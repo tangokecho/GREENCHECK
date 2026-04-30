@@ -11,6 +11,7 @@ ZIP_PATH = os.path.join(DIST, "demo_packet.zip")
 
 FILES_TO_INCLUDE = [
     os.path.join(ROOT, "raincheck_agent_logic.md"),
+    os.path.join(ROOT, "actionuity_agent_logic.md"),
     os.path.join(ROOT, "generate_pitch_kit_pdf.py"),
     os.path.join(ROOT, "apps", "api", "templates", "base.html"),
 ]
