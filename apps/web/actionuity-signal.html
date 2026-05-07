@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Actionuity — Signal Intelligence System</title>
+<style>
+:root{--ink:#0a0a0a;--paper:#f4f0e6;--amber:#b87a10;--al:#e09a28;--bg2:#ece8dc;--bg3:#e2ddd0;--bdr:rgba(10,10,10,.1);--bdr2:rgba(10,10,10,.2);--muted:#5a5650;--score-0:#f5e8e6;--score-1:#faecd4;--score-3:#e8f5ee}
+*{box-sizing:border-box}body{margin:0;font-family:Arial,sans-serif;background:var(--paper);color:var(--ink)}
+.mast,.nav,.footer{background:var(--ink);color:var(--paper)}
+.mast{padding:16px 24px;border-bottom:2px solid var(--amber)}
+.logo span{color:var(--al)}
+.nav{display:flex;gap:8px;padding:8px 12px}
+.nb{border:0;background:none;color:#bbb;padding:8px 10px;cursor:pointer}.nb.on{color:var(--al);border-bottom:2px solid var(--al)}
+.view{display:none;padding:16px 20px}.view.on{display:block}
+.scorer{border:1px solid var(--bdr2);background:var(--paper)}
+.sbtn{width:30px;height:30px}
+.verdict{margin-top:10px;padding:10px;background:var(--bg2);color:var(--muted)}
+.footer{padding:16px 24px;border-top:2px solid var(--amber)}
+</style>
+</head>
+<body>
+<div class="mast"><div class="logo">ACTIONUITY <span>SIGNAL INTEL</span></div></div>
+<div class="nav">
+  <button class="nb on" onclick="show('signals',this)">Signal Tracker</button>
+  <button class="nb" onclick="show('scorer',this)">Live Scorer</button>
+</div>
+<div id="v-signals" class="view on">Signal content loaded.</div>
+<div id="v-scorer" class="view">
+  <div class="scorer">
+    <div>Total: <span id="total-score">—</span>/9</div>
+    <div id="d-demand"><button class="sbtn" onclick="setScore('demand',0,this)">0</button><button class="sbtn" onclick="setScore('demand',1,this)">1</button><button class="sbtn" onclick="setScore('demand',2,this)">2</button><button class="sbtn" onclick="setScore('demand',3,this)">3</button></div>
+    <div id="d-budget"><button class="sbtn" onclick="setScore('budget',0,this)">0</button><button class="sbtn" onclick="setScore('budget',1,this)">1</button><button class="sbtn" onclick="setScore('budget',2,this)">2</button><button class="sbtn" onclick="setScore('budget',3,this)">3</button></div>
+    <div id="d-buying"><button class="sbtn" onclick="setScore('buying',0,this)">0</button><button class="sbtn" onclick="setScore('buying',1,this)">1</button><button class="sbtn" onclick="setScore('buying',2,this)">2</button><button class="sbtn" onclick="setScore('buying',3,this)">3</button></div>
+    <div id="verdict" class="verdict">Set all three scores to see verdict.</div>
+  </div>
+</div>
+<div class="footer">Fixed HTML/CSS/JS syntax-safe build.</div>
+<script>
+let activeView = 'signals';
+const scores = { demand: -1, budget: -1, buying: -1 };
+function show(id, btn) {
+  document.getElementById('v-' + activeView).classList.remove('on');
+  document.querySelectorAll('.nb').forEach(b => b.classList.remove('on'));
+  document.getElementById('v-' + id).classList.add('on');
+  btn.classList.add('on');
+  activeView = id;
+}
+function setScore(dim, val, btn) {
+  scores[dim] = val;
+  const container = document.getElementById('d-' + dim);
+  container.querySelectorAll('.sbtn').forEach(b => b.className = 'sbtn');
+  btn.className = `sbtn sel-${val}`;
+  updateTotal();
+}
+function updateTotal() {
+  const total = ['demand', 'budget', 'buying'].reduce((n, k) => n + (scores[k] >= 0 ? scores[k] : 0), 0);
+  const setCount = Object.values(scores).filter(v => v >= 0).length;
+  document.getElementById('total-score').textContent = setCount ? total : '—';
+  const v = document.getElementById('verdict');
+  if (setCount < 3) { v.textContent = 'Set all three scores to see verdict.'; v.style.background = 'var(--bg2)'; return; }
+  if (total <= 3) { v.textContent = `Score ${total} — Noise.`; v.style.background = 'var(--score-0)'; }
+  else if (total <= 6) { v.textContent = `Score ${total} — Watchlist.`; v.style.background = 'var(--score-1)'; }
+  else { v.textContent = `Score ${total} — MATERIAL SHIFT.`; v.style.background = 'var(--score-3)'; }
+}
+</script>
+</body>
+</html>
